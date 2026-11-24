@@ -13,6 +13,13 @@ def miss_chance(power, max_safe):
     return (power - max_safe) / (100 - max_safe) * MAX_MISS_CHANCE
 
 
+def aim_to_zone(ax, ay):
+    # точка прицілу (ax, ay від 0 до 1 всередині воріт) -> номер зони 0..5
+    col = min(int(ax * 3), 2)
+    row = min(int(ay * 2), 1)
+    return row * 3 + col
+
+
 def is_adjacent(a, b):
     # зони сусідні, якщо відрізняються рівно на одну клітинку по горизонталі або вертикалі
     row_a, col_a = a // 3, a % 3
