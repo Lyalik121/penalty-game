@@ -1,52 +1,62 @@
-# ui.py — графічна версія гри на tkinter (вся логіка — у game.py)
+# ui.py — інтерфейс гри: меню, екран гри, підсумок (вся логіка — у game.py)
+import math
 import tkinter as tk
+
+import theme
+from sound import play as play_sound
 from game import Game, SHOTS_IN_SERIES
 from keeper import ZONE_NAMES
 from levels import LEVELS, LEVEL_ORDER
 from records import load_records, save_record
-from shot import GOAL, SAVE, MISS
+from shot import GOAL, SAVE, MISS, aim_to_zone
+from theme import (PANEL, PANEL_LINE, TEXT, MUTED, GOLD, GREEN, RED, BLUE, PURPLE, BG,
+                   font, title_font, round_rect, lerp_color)
+from scene import (W, H, GX1, GX2, GY1, GY2, BALL_SPOT, KEEPER_HOME,
+                   draw_stadium, draw_pitch, draw_goal, draw_keeper, keeper_hands,
+                   draw_player, draw_ball, draw_crosshair, draw_star, draw_icon)
 
-# ---------- розміри й координати ----------
-W, H = 600, 480
-GX1, GY1, GX2, GY2 = 120, 70, 480, 250     # кути воріт
-COL_W = (GX2 - GX1) / 3                    # ширина однієї зони
-ROW_H = (GY2 - GY1) / 2                    # висота однієї зони
-BALL_START = (300, 375)                    # точка пенальті
-KEEPER_START = (300, GY2 - 32)             # воротар стоїть по центру
-BALL_R = 13
-BAR_X1, BAR_Y1, BAR_X2, BAR_Y2 = 150, 418, 450, 436   # шкала сили
-ANIM_STEPS = 20                            # кадрів в анімації удару
+FRAME_MS = 16             # один кадр ~16 мс (≈60 кадрів за секунду)
+AIM_SPEED = 0.018         # швидкість прицілу (частка ширини воріт за кадр)
+POWER_SPEED = 2.2         # швидкість шкали сили (одиниць за кадр)
+FLIGHT_SPEED = 0.04       # швидкість польоту м'яча (t від 0 до 1)
+RUNUP_FRAMES = 22         # скільки кадрів триває розбіг гравця
+PLAYER_HOME = (330, 590)  # де стоїть гравець до удару
+RESULT_FRAMES = 70        # скільки кадрів показуємо напис ГОЛ!/СЕЙВ!
 
-GRASS_1, GRASS_2 = "#2e8b57", "#339966"    # дві смуги газону
 RESULT_TEXT = {GOAL: "ГОЛ!", SAVE: "СЕЙВ!", MISS: "ПРОМАХ!"}
-RESULT_COLOR = {GOAL: "#7CFC00", SAVE: "#ff4d4d", MISS: "#dddddd"}
+RESULT_SOUND = {GOAL: "goal", SAVE: "save", MISS: "miss"}
+RESULT_COLOR = {GOAL: GREEN, SAVE: RED, MISS: "#dddddd"}
+
+# три кроки удару: назва і підказка
+STEPS = ["aim_x", "aim_y", "power"]
+STEP_TEXT = {
+    "aim_x": ("НАПРЯМОК", "Приціл рухається вліво-вправо · пробіл — зупинити"),
+    "aim_y": ("ВИСОТА", "Приціл рухається вгору-вниз · пробіл — зупинити"),
+    "power": ("СИЛА", "Зупиніть шкалу в зеленій зоні · пробіл — удар"),
+}
+GAME_STATES = STEPS + ["runup", "flying", "result"]
+
+KEEPER_IDLE_HANDS = -44   # де руки воротаря, коли він стоїть (відносно ніг)
 
 
-def zone_rect(zone):
-    # прямокутник зони на екрані: рядок = zone // 3, стовпчик = zone % 3
-    row, col = zone // 3, zone % 3
-    x1 = GX1 + col * COL_W
-    y1 = GY1 + row * ROW_H
-    return x1, y1, x1 + COL_W, y1 + ROW_H
+def aim_point(ax, ay):
+    # точка прицілу (0..1) -> координати на екрані
+    return GX1 + ax * (GX2 - GX1), GY1 + ay * (GY2 - GY1)
 
 
-def zone_center(zone):
-    x1, y1, x2, y2 = zone_rect(zone)
-    return (x1 + x2) / 2, (y1 + y2) / 2
+def bounce(value, direction, speed, low, high):
+    # рух туди-назад між low і high (для прицілу і шкали сили)
+    value += direction * speed
+    if value >= high:
+        return high, -1
+    if value <= low:
+        return low, 1
+    return value, direction
 
 
-def zone_at(x, y):
-    # яка зона під курсором (або None, якщо клік поза воротами)
-    if not (GX1 <= x < GX2 and GY1 <= y < GY2):
-        return None
-    col = int((x - GX1) // COL_W)
-    row = int((y - GY1) // ROW_H)
-    return row * 3 + col
-
-
-def power_x(power):
-    # координата x на шкалі для сили 0..100
-    return BAR_X1 + (BAR_X2 - BAR_X1) * power / 100
+def lerp(a, b, t):
+    # значення між a і b
+    return a + (b - a) * t
 
 
 class PenaltyApp:
@@ -54,304 +64,473 @@ class PenaltyApp:
         self.root = root
         root.title("Пенальті з воротарем, що вчиться")
         root.resizable(False, False)
-        self.canvas = tk.Canvas(root, width=W, height=H, highlightthickness=0)
+        theme.pick_fonts(root)
+        self.canvas = tk.Canvas(root, width=W, height=H, bg=BG, highlightthickness=0)
         self.canvas.pack()
 
         self.game = Game()
-        self.selected = 4        # обрана зона (спочатку низ-центр)
-        self.power = 0
-        self.power_dir = 1       # шкала рухається вгору (1) чи вниз (-1)
-        self.state = "menu"      # menu / aim / power / flying / result / over
-
-        self.draw_field()
-        self.create_items()
-        self.setup_power_bar()
+        self.buttons = []         # кнопки поточного екрана: (x1, y1, x2, y2, дія)
+        self.last_game = None     # (текст результату, рівень) для панелі "Остання гра"
+        self.state = "menu"
 
         root.bind("<Key>", self.on_key)
         self.canvas.bind("<Button-1>", self.on_click)
         self.show_menu()
+        self.tick()               # запускаємо ігровий цикл
 
-    # ================= малювання =================
-    def draw_field(self):
+    # ================= допоміжне малювання =================
+    def clear(self):
+        self.canvas.delete("all")
+        self.buttons = []
+
+    def panel(self, x1, y1, x2, y2, outline=PANEL_LINE, tag=""):
+        round_rect(self.canvas, x1, y1, x2, y2, r=14, fill=PANEL, outline=outline, width=2, tags=tag)
+
+    def button(self, x1, y1, x2, y2, text, action, primary=True, tag=""):
+        # жовта (primary) або контурна кнопка, яку можна натиснути мишкою
         c = self.canvas
-        # газон смугами
-        stripe = 60
-        for i in range(W // stripe + 1):
-            color = GRASS_1 if i % 2 == 0 else GRASS_2
-            c.create_rectangle(i * stripe, 0, (i + 1) * stripe, H, fill=color, outline="")
-        # лінія воріт і штрафний майданчик
-        c.create_line(0, GY2, W, GY2, fill="white", width=2)
-        c.create_rectangle(70, GY2, 530, 300, outline="white", width=2)
-        c.create_rectangle(20, GY2, 580, 400, outline="white", width=2)
-        # точка пенальті
-        x, y = BALL_START
-        c.create_oval(x - 4, y - 4, x + 4, y + 4, fill="white", outline="")
-        # сітка воріт
-        for x in range(GX1, GX2 + 1, 15):
-            c.create_line(x, GY1, x, GY2, fill="#b8d8c4")
-        for y in range(GY1, GY2 + 1, 15):
-            c.create_line(GX1, y, GX2, y, fill="#b8d8c4")
-        # штанги і перекладина
-        c.create_line(GX1, GY2, GX1, GY1, GX2, GY1, GX2, GY2, fill="white", width=8)
-
-    def create_items(self):
-        c = self.canvas
-        # межі зон (видно тільки під час прицілювання)
-        self.zone_lines = [
-            c.create_line(GX1 + COL_W, GY1, GX1 + COL_W, GY2, fill="yellow", dash=(4, 4)),
-            c.create_line(GX1 + 2 * COL_W, GY1, GX1 + 2 * COL_W, GY2, fill="yellow", dash=(4, 4)),
-            c.create_line(GX1, GY1 + ROW_H, GX2, GY1 + ROW_H, fill="yellow", dash=(4, 4)),
-        ]
-        self.highlight = c.create_rectangle(0, 0, 0, 0, outline="yellow", width=3)
-
-        # воротар: руки, тулуб, голова, рукавички
-        self.k_arm_l = c.create_line(0, 0, 0, 0, fill="#ff8c00", width=7)
-        self.k_arm_r = c.create_line(0, 0, 0, 0, fill="#ff8c00", width=7)
-        self.k_body = c.create_rectangle(0, 0, 0, 0, fill="#ff8c00", outline="black")
-        self.k_head = c.create_oval(0, 0, 0, 0, fill="#f1c27d", outline="black")
-        self.k_glove_l = c.create_oval(0, 0, 0, 0, fill="white", outline="black")
-        self.k_glove_r = c.create_oval(0, 0, 0, 0, fill="white", outline="black")
-
-        # м'яч з плямою
-        self.ball = c.create_oval(0, 0, 0, 0, fill="white", outline="black", width=2)
-        self.ball_spot = c.create_oval(0, 0, 0, 0, fill="black", outline="")
-
-        # шкала сили: три кольорові ділянки, рамка і бігунок
-        self.bar_weak = c.create_rectangle(0, 0, 0, 0, fill="#c9a227", outline="")
-        self.bar_good = c.create_rectangle(0, 0, 0, 0, fill="#2fb34a", outline="")
-        self.bar_risk = c.create_rectangle(0, 0, 0, 0, fill="#c0392b", outline="")
-        c.create_rectangle(BAR_X1, BAR_Y1, BAR_X2, BAR_Y2, outline="white", width=2)
-        self.bar_marker = c.create_rectangle(0, 0, 0, 0, fill="white", outline="black")
-        self.lbl_weak = c.create_text(0, BAR_Y2 + 12, text="слабко", fill="white", font=("Arial", 9))
-        self.lbl_good = c.create_text(0, BAR_Y2 + 12, text="ідеально", fill="white", font=("Arial", 9))
-        self.lbl_risk = c.create_text(0, BAR_Y2 + 12, text="ризик", fill="white", font=("Arial", 9))
-
-        # тексти
-        self.hud = c.create_text(10, 10, anchor="nw", fill="white", font=("Arial", 14, "bold"))
-        self.msg = c.create_text(W / 2, 320, fill="white", font=("Arial", 12))
-        self.big = c.create_text(W / 2, 160, fill="white", font=("Arial", 44, "bold"))
-
-    def place_keeper(self, x, y, lean=0.0):
-        # lean від -1 (стрибок вліво) до 1 (вправо): руки тягнуться в бік стрибка
-        c = self.canvas
-        c.coords(self.k_body, x - 16, y - 20, x + 16, y + 32)
-        c.coords(self.k_head, x - 11 + lean * 8, y - 42, x + 11 + lean * 8, y - 20)
-        gy = y - 28 - abs(lean) * 12                  # у стрибку руки вище
-        lx, rx = x - 32 + lean * 22, x + 32 + lean * 22
-        c.coords(self.k_arm_l, x - 14, y - 14, lx, gy)
-        c.coords(self.k_arm_r, x + 14, y - 14, rx, gy)
-        c.coords(self.k_glove_l, lx - 8, gy - 8, lx + 8, gy + 8)
-        c.coords(self.k_glove_r, rx - 8, gy - 8, rx + 8, gy + 8)
-
-    def place_ball(self, x, y, r=BALL_R):
-        self.canvas.coords(self.ball, x - r, y - r, x + r, y + r)
-        s = r * 0.4
-        self.canvas.coords(self.ball_spot, x - s, y - s, x + s, y + s)
-
-    def setup_power_bar(self):
-        # ділянки шкали залежать від рівня (min_power і max_safe)
-        lo, hi = self.game.min_power, self.game.max_safe
-        c = self.canvas
-        c.coords(self.bar_weak, BAR_X1, BAR_Y1, power_x(lo), BAR_Y2)
-        c.coords(self.bar_good, power_x(lo), BAR_Y1, power_x(hi), BAR_Y2)
-        c.coords(self.bar_risk, power_x(hi), BAR_Y1, BAR_X2, BAR_Y2)
-        c.coords(self.lbl_weak, power_x(lo / 2), BAR_Y2 + 12)
-        c.coords(self.lbl_good, power_x((lo + hi) / 2), BAR_Y2 + 12)
-        c.coords(self.lbl_risk, power_x((hi + 100) / 2), BAR_Y2 + 12)
-
-    def update_power_bar(self):
-        x = power_x(self.power)
-        self.canvas.coords(self.bar_marker, x - 3, BAR_Y1 - 5, x + 3, BAR_Y2 + 5)
-
-    def update_hud(self):
-        g = self.game
-        level = LEVELS[g.level]["name"]
-        if g.golden_shot and not g.is_over():
-            shot = "ЗОЛОТИЙ УДАР"
+        if primary:
+            round_rect(c, x1, y1, x2, y2, r=10, fill=GOLD, outline="", tags=tag)
+            c.create_text((x1 + x2) / 2, (y1 + y2) / 2, text=text, fill="#1a1405", font=title_font(11), tags=tag)
         else:
-            shot = f"Удар {min(g.shot_num + 1, SHOTS_IN_SERIES)}/{SHOTS_IN_SERIES}"
-        self.canvas.itemconfig(self.hud, text=f"{shot}   Голи: {g.goals}   Рівень: {level}")
+            round_rect(c, x1, y1, x2, y2, r=10, fill=PANEL, outline=PANEL_LINE, width=2, tags=tag)
+            c.create_text((x1 + x2) / 2, (y1 + y2) / 2, text=text, fill=TEXT, font=title_font(11), tags=tag)
+        self.buttons.append((x1, y1, x2, y2, action))
 
-    def show_zones(self, visible):
-        state = "normal" if visible else "hidden"
-        for item in self.zone_lines + [self.highlight]:
-            self.canvas.itemconfig(item, state=state)
-
-    def show_panel(self, lines):
-        # темна панель поверх гри (меню або підсумок)
+    def card(self, x, y, icon, title, sub, accent, action):
+        # картка меню з іконкою
         c = self.canvas
-        c.delete("panel")
-        c.create_rectangle(60, 40, 540, 450, fill="#123524", outline="white", width=2, tags="panel")
-        y = 80
-        for text, size, bold in lines:
-            font = ("Arial", size, "bold") if bold else ("Arial", size)
-            c.create_text(W / 2, y, text=text, fill="white", font=font, tags="panel")
-            y += size + 18
+        self.panel(x, y, x + 270, y + 70)
+        c.create_line(x + 2, y + 12, x + 2, y + 58, fill=accent, width=4)
+        round_rect(c, x + 16, y + 15, x + 56, y + 55, r=10, fill="", outline=accent, width=2)
+        draw_icon(c, icon, x + 36, y + 35, accent)
+        c.create_text(x + 70, y + 27, text=title, anchor="w", fill=TEXT, font=title_font(15))
+        c.create_text(x + 70, y + 49, text=sub, anchor="w", fill=MUTED, font=font(9))
+        c.create_text(x + 250, y + 35, text="→", fill=MUTED, font=font(14))
+        self.buttons.append((x, y, x + 270, y + 70, action))
 
-    # ================= стани гри =================
+    # ================= меню =================
     def show_menu(self):
         self.state = "menu"
-        records = load_records()
-        lines = [("Пенальті з воротарем,", 24, True), ("що вчиться", 24, True), ("", 6, False),
-                 ("Оберіть рівень:", 14, False)]
-        for i, key in enumerate(LEVEL_ORDER, start=1):
-            best = records.get(key, 0)
-            lines.append((f"{i} — {LEVELS[key]['name']}   (рекорд: {best})", 14, True))
-        lines += [("", 6, False),
-                  ("Стрілки або мишка — вибір зони", 11, False),
-                  ("Пробіл — шкала сили, ще раз пробіл — удар", 11, False),
-                  ("Воротар запам'ятовує, куди ви б'єте!", 11, False)]
-        self.show_panel(lines)
+        self.clear()
+        c = self.canvas
+        draw_stadium(c, dim=0.6)
+        draw_pitch(c, dim=0.6)
+        draw_goal(c, dx=230)
+        draw_keeper(c, 710, KEEPER_HOME[1], tag="bg")
 
+        # логотип і заголовок
+        draw_star(c, 46, 40, 14, GOLD)
+        c.create_text(72, 32, text="НАВЧАЛЬНИЙ ПРОЄКТ", anchor="w", fill=MUTED, font=font(8, True))
+        c.create_text(72, 48, text="ПЕНАЛЬТІ", anchor="w", fill=TEXT, font=title_font(13))
+        c.create_line(40, 135, 70, 135, fill=GOLD, width=2)
+        c.create_text(80, 135, text="PYTHON + TKINTER · 2026", anchor="w", fill="#c9d3d6", font=font(9, True))
+        c.create_text(36, 205, text="ПЕНАЛЬТІ", anchor="w", fill=TEXT, font=title_font(58))
+        c.create_text(38, 268, text="ВОРОТАР, ЩО ВЧИТЬСЯ", anchor="w", fill=GOLD, font=title_font(28))
+        c.create_text(40, 305, text="Він запам'ятовує, куди ви б'єте. Перехитріть його.",
+                      anchor="w", fill="#c9d3d6", font=font(11))
+
+        # картки
+        self.card(36, 340, "play", "ШВИДКА ГРА", "5 ударів · середній рівень", GOLD,
+                  lambda: self.start_game("medium"))
+        self.card(320, 340, "levels", "РІВНІ", "Легкий · Середній · Складний", GREEN, self.show_levels)
+        self.card(36, 422, "list", "РЕКОРДИ", "Ваші найкращі серії", BLUE, self.show_records)
+        self.card(320, 422, "help", "ЯК ГРАТИ", "Приціл, висота, сила", PURPLE, self.show_help)
+        c.create_text(40, 520, text="ENTER — ШВИДКА ГРА", anchor="w", fill="#c9d3d6", font=font(9, True))
+
+        # остання гра
+        self.panel(680, 350, 930, 422, outline=GOLD)
+        if self.last_game:
+            text, level = self.last_game
+            c.create_text(698, 368, text="ОСТАННЯ ГРА", anchor="w", fill=MUTED, font=font(8, True))
+            c.create_text(698, 392, text=text, anchor="w", fill=TEXT, font=title_font(15))
+            c.create_text(698, 410, text=LEVELS[level]["name"] + " рівень", anchor="w", fill=MUTED, font=font(9))
+            self.button(840, 376, 916, 402, "РЕВАНШ", lambda: self.start_game(level))
+        else:
+            c.create_text(698, 368, text="ПЕРША ГРА", anchor="w", fill=MUTED, font=font(8, True))
+            c.create_text(698, 392, text="Воротар ще не знає вас", anchor="w", fill=TEXT, font=title_font(14))
+            c.create_text(698, 410, text="Скористайтесь цим!", anchor="w", fill=MUTED, font=font(9))
+
+        # рекорди
+        self.panel(680, 434, 930, 566)
+        c.create_text(698, 452, text="РЕКОРДИ", anchor="w", fill=MUTED, font=font(8, True))
+        records = load_records()
+        for i, (key, color) in enumerate(zip(LEVEL_ORDER, [GREEN, GOLD, RED])):
+            x = 692 + i * 80
+            round_rect(c, x, 466, x + 72, 556, r=10, fill="#132530", outline="")
+            c.create_oval(x + 28, 478, x + 44, 494, outline=color, width=2)
+            c.create_text(x + 36, 516, text=str(records.get(key, 0)), fill=color, font=title_font(22))
+            c.create_text(x + 36, 542, text=LEVELS[key]["name"].upper(), fill=MUTED, font=font(7, True))
+
+        c.create_text(W / 2, 582, text="Гра створена: Василега Артьом, Коваленко Михайло",
+                      fill="#c9d3d6", font=font(9, True))
+
+    def overlay(self, title):
+        # велика панель поверх меню (рівні, рекорди, як грати)
+        self.buttons = []           # кнопки меню під панеллю не мають натискатись
+        c = self.canvas
+        self.panel(230, 110, 730, 520, outline=GOLD)
+        c.create_text(W / 2, 145, text=title, fill=TEXT, font=title_font(22))
+        self.button(420, 470, 540, 502, "НАЗАД", self.show_menu, primary=False)
+
+    def show_levels(self):
+        self.state = "levels"
+        self.overlay("ОБЕРІТЬ РІВЕНЬ")
+        c = self.canvas
+        desc = {"easy": "Воротар часто стрибає навмання і швидко забуває",
+                "medium": "Воротар помічає ваші улюблені кути",
+                "hard": "Воротар довго пам'ятає, зелена зона сили вужча"}
+        for i, (key, color) in enumerate(zip(LEVEL_ORDER, [GREEN, GOLD, RED])):
+            y = 180 + i * 92
+            round_rect(c, 270, y, 690, y + 78, r=12, fill="#132530", outline=color, width=2)
+            c.create_text(300, y + 39, text=str(i + 1), fill=color, font=title_font(26))
+            c.create_text(340, y + 28, text=LEVELS[key]["name"].upper(), anchor="w", fill=TEXT, font=title_font(16))
+            c.create_text(340, y + 52, text=desc[key], anchor="w", fill=MUTED, font=font(10))
+            self.buttons.append((270, y, 690, y + 78, lambda k=key: self.start_game(k)))
+
+    def show_records(self):
+        self.state = "records"
+        self.overlay("РЕКОРДИ")
+        c = self.canvas
+        records = load_records()
+        for i, (key, color) in enumerate(zip(LEVEL_ORDER, [GREEN, GOLD, RED])):
+            y = 200 + i * 70
+            c.create_text(300, y, text=LEVELS[key]["name"], anchor="w", fill=TEXT, font=title_font(18))
+            c.create_text(660, y, text=f"{records.get(key, 0)} голів", anchor="e", fill=color, font=title_font(18))
+            c.create_line(300, y + 26, 660, y + 26, fill=PANEL_LINE)
+        c.create_text(W / 2, 420, text="Рекорд — найбільше голів за одну серію на рівні",
+                      fill=MUTED, font=font(10))
+
+    def show_help(self):
+        self.state = "help"
+        self.overlay("ЯК ГРАТИ")
+        lines = ["1. Приціл бігає вліво-вправо — пробіл, щоб зупинити.",
+                 "2. Потім вгору-вниз — пробіл ще раз.",
+                 "3. Шкала сили: зелена зона — ідеально,",
+                 "    жовта — слабко, червона — ризик промаху.",
+                 "4. Серія — 5 ударів. 4+ голи — перемога, 3 — золотий удар.",
+                 "",
+                 "Воротар запам'ятовує, куди ви б'єте, і читає",
+                 "улюблені кути. Міняйте тактику!"]
+        for i, text in enumerate(lines):
+            self.canvas.create_text(270, 190 + i * 32, text=text, anchor="w", fill=TEXT, font=font(12))
+
+    # ================= гра =================
     def start_game(self, level):
         self.game.set_level(level)
-        self.setup_power_bar()
-        self.canvas.delete("panel")
+        self.clear()
+        c = self.canvas
+        # статичний фон малюємо один раз, а рухомі речі — щокадру з тегом "dyn"
+        draw_stadium(c)
+        draw_pitch(c)
+        draw_goal(c)
+        self.shot_log = []                 # (точка прицілу, зона воротаря, результат) для карти ударів
         self.start_shot()
 
     def start_shot(self):
-        self.state = "aim"
-        self.power = 0
-        self.power_dir = 1
-        self.place_ball(*BALL_START)
-        self.place_keeper(*KEEPER_START)
-        self.canvas.itemconfig(self.big, text="")
-        self.show_zones(True)
-        self.canvas.coords(self.highlight, *zone_rect(self.selected))
-        self.update_power_bar()
-        self.update_hud()
-        # підказка, що воротар почав читати гравця
-        text = "Оберіть зону стрілками або мишкою, потім пробіл"
-        if self.game.keeper.suspects() is not None:
-            text = "Воротар щось запідозрив...\n" + text
-        self.canvas.itemconfig(self.msg, text=text)
+        self.state = "aim_x"
+        self.ax, self.ay = 0.5, 0.5        # приціл у центрі воріт
+        self.aim_dir = 1
+        self.power, self.power_dir = 0, 1
+        self.ball = BALL_SPOT
+        self.ball_r = 11
+        self.ball_shadow = BALL_SPOT[1] + 11
+        self.keeper_x, self.keeper_y = KEEPER_HOME
+        self.keeper_lean = 0.0
+        self.keeper_hands = KEEPER_IDLE_HANDS
+        self.result = None
+        self.player_pos = PLAYER_HOME
+        self.swing = 0.0
 
-    def start_power(self):
-        self.state = "power"
-        self.canvas.itemconfig(self.msg, text="Пробіл — зупинити шкалу сили")
-        self.tick_power()
-
-    def tick_power(self):
-        # шкала бігає 0 -> 100 -> 0, поки гравець не натисне пробіл
-        if self.state != "power":
-            return
-        self.power += 3 * self.power_dir
-        if self.power >= 100:
-            self.power, self.power_dir = 100, -1
-        elif self.power <= 0:
-            self.power, self.power_dir = 0, 1
-        self.update_power_bar()
-        self.root.after(20, self.tick_power)
+    def press(self):
+        # пробіл або клік: зупинити поточний крок
+        if self.state == "aim_x":
+            self.state = "aim_y"
+            self.ay, self.aim_dir = 0.95, -1     # висота стартує знизу
+        elif self.state == "aim_y":
+            self.state = "power"
+        elif self.state == "power":
+            self.shoot()
 
     def shoot(self):
-        self.state = "flying"
-        self.show_zones(False)
-        self.canvas.itemconfig(self.msg, text="")
-        result, keeper_zone = self.game.shoot(self.selected, self.power)
-        self.last_result = result
+        zone = aim_to_zone(self.ax, self.ay)
+        self.result, keeper_zone = self.game.shoot(zone, self.power)
+        self.state = "runup"               # спочатку розбіг, потім політ м'яча
+        self.run_t = 0.0
+        self.t = 0.0
+        self.shot_log.append((aim_point(self.ax, self.ay), keeper_zone, self.result))
 
-        # куди летить воротар і в який бік нахиляється
-        self.keeper_target = zone_center(keeper_zone)
-        self.keeper_target = (self.keeper_target[0], self.keeper_target[1] + 8)
-        self.lean = [-1, 0, 1][keeper_zone % 3]
+        # куди стрибає воротар: руки мають опинитись у центрі його зони
+        col, row = keeper_zone % 3, keeper_zone // 3
+        lean = [-1, 0, 1][col]
+        zx = GX1 + (col + 0.5) * (GX2 - GX1) / 3
+        if row == 0:                                 # верхня зона — стрибок вгору
+            hands = -70
+            zy = GY1 + 28
+        else:                                        # нижня — руки внизу
+            hands = -22
+            zy = GY2 - 26
+        self.k_from = (self.keeper_x, self.keeper_y, 0.0, KEEPER_IDLE_HANDS)
+        ky = min(KEEPER_HOME[1], zy - hands)         # ноги не можуть бути нижче газону
+        self.k_to = (zx - lean * 30, ky, float(lean), hands)
 
         # куди летить м'яч
-        if result == SAVE:
-            self.ball_target = (self.keeper_target[0] + self.lean * 22, self.keeper_target[1] - 28)
-        elif result == MISS:
-            x, y = zone_center(self.selected)
-            col = self.selected % 3
-            if col == 0:
-                x = GX1 - 45                                # повз лівої штанги
-            elif col == 2:
-                x = GX2 + 45                                # повз правої штанги
+        tx, ty = aim_point(self.ax, self.ay)
+        if self.result == SAVE:
+            tx, ty = keeper_hands(*self.k_to[:3], self.k_to[3])
+        elif self.result == MISS:
+            aim_col = zone % 3
+            if aim_col == 0:
+                tx = GX1 - 45                         # повз лівої штанги
+            elif aim_col == 2:
+                tx = GX2 + 45                         # повз правої
             else:
-                y = GY1 - 35                                # над перекладиною
-            self.ball_target = (x, y)
-        else:
-            self.ball_target = zone_center(self.selected)
-        self.animate(0)
+                ty = GY1 - 35                         # над перекладиною
+        self.b_from = BALL_SPOT
+        self.b_to = (tx, ty)
 
-    def animate(self, step):
-        # плавно рухаємо м'яч і воротаря від старту до цілі
-        t = step / ANIM_STEPS
-        bx = BALL_START[0] + (self.ball_target[0] - BALL_START[0]) * t
-        by = BALL_START[1] + (self.ball_target[1] - BALL_START[1]) * t
-        # воротар реагує трохи пізніше за м'яч
-        kt = max(0.0, (t - 0.2) / 0.8)
-        kx = KEEPER_START[0] + (self.keeper_target[0] - KEEPER_START[0]) * kt
-        ky = KEEPER_START[1] + (self.keeper_target[1] - KEEPER_START[1]) * kt
-        self.place_ball(bx, by, BALL_R * (1 - 0.35 * t))   # м'яч "віддаляється"
-        self.place_keeper(kx, ky, self.lean * kt)
-        if step < ANIM_STEPS:
-            self.root.after(25, self.animate, step + 1)
-        else:
-            self.show_result()
+    def update_runup(self):
+        # розбіг: гравець іде до м'яча, права нога відводиться назад і падає в удар
+        self.run_t = min(1.0, self.run_t + 1 / RUNUP_FRAMES)
+        r = self.run_t
+        self.player_pos = (PLAYER_HOME[0] + 50 * r, PLAYER_HOME[1] - 30 * r)
+        self.swing = math.sin(math.pi * r)
+        if r >= 1.0:
+            self.swing = 0.0
+            self.state = "flying"
+            play_sound("kick")
 
-    def show_result(self):
-        self.state = "result"
-        r = self.last_result
-        self.canvas.itemconfig(self.big, text=RESULT_TEXT[r], fill=RESULT_COLOR[r])
-        self.update_hud()
-        if self.game.is_over():
-            self.root.after(1300, self.show_summary)
-        else:
-            if self.game.golden_shot:
-                self.canvas.itemconfig(self.msg, text="Нічия! Буде золотий удар")
-            self.root.after(1300, self.start_shot)
+    def update_flight(self):
+        # один кадр польоту м'яча і стрибка воротаря
+        self.t = min(1.0, self.t + FLIGHT_SPEED)
+        t = self.t
+        (bx1, by1), (bx2, by2) = self.b_from, self.b_to
+        self.ball = (lerp(bx1, bx2, t), lerp(by1, by2, t) - 25 * 4 * t * (1 - t))   # невелика дуга
+        self.ball_r = lerp(11, 6, t)
+        self.ball_shadow = lerp(BALL_SPOT[1] + 11, GY2 + 2, t)
+        kt = max(0.0, (t - 0.15) / 0.85)             # воротар реагує трохи пізніше
+        f, to = self.k_from, self.k_to
+        self.keeper_x = lerp(f[0], to[0], kt)
+        self.keeper_y = lerp(f[1], to[1], kt)
+        self.keeper_lean = lerp(f[2], to[2], kt)
+        self.keeper_hands = lerp(f[3], to[3], kt)
+        if t >= 1.0:
+            self.state = "result"
+            self.frames_left = RESULT_FRAMES
+            play_sound(RESULT_SOUND[self.result])
 
+    # ================= ігровий цикл =================
+    def tick(self):
+        # викликається кожні FRAME_MS: оновлюємо стан і перемальовуємо рухомі об'єкти
+        s = self.state
+        if s == "aim_x":
+            self.ax, self.aim_dir = bounce(self.ax, self.aim_dir, AIM_SPEED, 0.0, 1.0)
+        elif s == "aim_y":
+            self.ay, self.aim_dir = bounce(self.ay, self.aim_dir, AIM_SPEED, 0.0, 1.0)
+        elif s == "power":
+            self.power, self.power_dir = bounce(self.power, self.power_dir, POWER_SPEED, 0, 100)
+        elif s == "runup":
+            self.update_runup()
+        elif s == "flying":
+            self.update_flight()
+        elif s == "result":
+            self.frames_left -= 1
+            if self.frames_left <= 0:
+                if self.game.is_over():
+                    self.show_summary()
+                else:
+                    self.start_shot()
+        if self.state in GAME_STATES:
+            self.draw_frame()
+        self.root.after(FRAME_MS, self.tick)
+
+    def draw_frame(self):
+        c = self.canvas
+        c.delete("dyn")              # стираємо все рухоме з минулого кадру
+        draw_player(c, *self.player_pos, tag="dyn", swing=self.swing)
+        draw_keeper(c, self.keeper_x, self.keeper_y, self.keeper_lean, hands=self.keeper_hands)
+        if self.state in STEPS:
+            draw_crosshair(c, *aim_point(self.ax, self.ay), BALL_SPOT)
+        draw_ball(c, *self.ball, r=self.ball_r, shadow_y=self.ball_shadow)
+        self.draw_scoreboard()
+        self.draw_intuition()
+        if self.state in STEPS:
+            self.draw_step_panel()
+        if self.state == "result":
+            c.create_text(W / 2, 175, text=RESULT_TEXT[self.result], fill=RESULT_COLOR[self.result],
+                          font=title_font(56), tags="dyn")
+            if self.game.golden_shot and not self.game.is_over():
+                c.create_text(W / 2, 215, text="Нічия! Буде золотий удар", fill=GOLD,
+                              font=title_font(16), tags="dyn")
+
+    def draw_scoreboard(self):
+        c, g = self.canvas, self.game
+        round_rect(c, 270, 14, 690, 74, r=16, fill=PANEL, outline=PANEL_LINE, width=2, tags="dyn")
+        c.create_text(292, 36, text="ВИ", anchor="w", fill=TEXT, font=title_font(15), tags="dyn")
+        c.create_text(292, 56, text="Нападник", anchor="w", fill=MUTED, font=font(9), tags="dyn")
+        c.create_text(428, 44, text=str(g.goals), fill=TEXT, font=title_font(28), tags="dyn")
+        c.create_text(668, 36, text="ВОРОТАР", anchor="e", fill=TEXT, font=title_font(15), tags="dyn")
+        c.create_text(668, 56, text="ШІ · " + LEVELS[g.level]["name"].lower(), anchor="e",
+                      fill=MUTED, font=font(9), tags="dyn")
+        c.create_text(532, 44, text=str(g.shot_num - g.goals), fill=TEXT, font=title_font(28), tags="dyn")
+        c.create_line(455, 22, 455, 66, fill=PANEL_LINE, tags="dyn")
+        c.create_line(505, 22, 505, 66, fill=PANEL_LINE, tags="dyn")
+
+        # номер удару: під час польоту показуємо поточний, а не наступний
+        current = g.shot_num if self.state in ("flying", "result") else g.shot_num + 1
+        if g.golden_shot:
+            label = "ЗОЛОТИЙ"
+        else:
+            label = f"УДАР {min(current, SHOTS_IN_SERIES)}/{SHOTS_IN_SERIES}"
+        c.create_text(480, 30, text=label, fill=MUTED, font=font(8, True), tags="dyn")
+
+        # кружечки ударів: зелений — гол, червоний — ні, жовтий контур — поточний
+        n = SHOTS_IN_SERIES + (1 if g.golden_shot else 0)
+        start = 480 - (n - 1) * 7.5 / 2
+        for i in range(n):
+            x = start + i * 7.5
+            if i < len(g.shots):
+                color = GREEN if g.shots[i][2] == GOAL else RED
+                c.create_oval(x - 3, 47, x + 3, 53, fill=color, outline="", tags="dyn")
+            elif i == len(g.shots):
+                c.create_oval(x - 3.5, 46.5, x + 3.5, 53.5, outline=GOLD, width=2, tags="dyn")
+            else:
+                c.create_oval(x - 3, 47, x + 3, 53, fill="#3a4a55", outline="", tags="dyn")
+
+    def draw_intuition(self):
+        # міні-карта воріт: червоним — зони, які воротар запам'ятав
+        c = self.canvas
+        keeper = self.game.keeper
+        round_rect(c, 20, 14, 230, 92, r=14, fill=PANEL, outline=PANEL_LINE, width=2, tags="dyn")
+        c.create_text(36, 30, text="ІНТУЇЦІЯ ВОРОТАРЯ", anchor="w", fill=MUTED, font=font(8, True), tags="dyn")
+        top = max(2.0, max(keeper.history))
+        for z, h in enumerate(keeper.history):
+            x1, y1 = 36 + (z % 3) * 38, 42 + (z // 3) * 22
+            c.create_rectangle(x1, y1, x1 + 34, y1 + 18, outline="",
+                               fill=lerp_color("#1c2c36", RED, h / top), tags="dyn")
+        if keeper.suspects() is not None:
+            c.create_text(158, 52, text="Він помітив", anchor="w", fill=TEXT, font=font(9), tags="dyn")
+            c.create_text(158, 68, text="ваш кут!", anchor="w", fill=GOLD, font=font(9, True), tags="dyn")
+        else:
+            c.create_text(158, 52, text="Вивчає", anchor="w", fill=TEXT, font=font(9), tags="dyn")
+            c.create_text(158, 68, text="вас...", anchor="w", fill=MUTED, font=font(9), tags="dyn")
+
+    def draw_step_panel(self):
+        # панель кроку внизу праворуч + підказка зліва
+        c, g = self.canvas, self.game
+        step = STEPS.index(self.state)
+        title, hint = STEP_TEXT[self.state]
+        round_rect(c, 640, 470, 940, 582, r=16, fill=PANEL, outline=PANEL_LINE, width=2, tags="dyn")
+        for i in range(3):
+            color = GOLD if i <= step else "#3a4a55"
+            c.create_line(752 + i * 20, 488, 766 + i * 20, 488, fill=color, width=3, tags="dyn")
+        c.create_text(790, 507, text=title, fill=TEXT, font=title_font(14), tags="dyn")
+        c.create_text(790, 528, text=hint, fill=MUTED, font=font(9), tags="dyn")
+
+        if self.state == "power":
+            # шкала сили з кольоровими ділянками (межі залежать від рівня)
+            x1, x2, y1, y2 = 665, 915, 546, 562
+            px = lambda p: x1 + (x2 - x1) * p / 100
+            c.create_rectangle(x1, y1, px(g.min_power), y2, fill="#c9a227", outline="", tags="dyn")
+            c.create_rectangle(px(g.min_power), y1, px(g.max_safe), y2, fill="#2fb34a", outline="", tags="dyn")
+            c.create_rectangle(px(g.max_safe), y1, x2, y2, fill="#c0392b", outline="", tags="dyn")
+            c.create_rectangle(x1, y1, x2, y2, outline="white", tags="dyn")
+            m = px(self.power)
+            c.create_rectangle(m - 3, y1 - 5, m + 3, y2 + 5, fill="white", outline="black", tags="dyn")
+            if self.power > g.max_safe:
+                round_rect(c, 868, 478, 930, 494, r=6, fill="", outline=RED, tags="dyn")
+                c.create_text(899, 486, text="РИЗИК", fill=RED, font=font(7, True), tags="dyn")
+        else:
+            round_rect(c, 735, 543, 845, 571, r=10, fill=GOLD, outline="", tags="dyn")
+            c.create_text(790, 557, text="ЗУПИНИТИ", fill="#1a1405", font=title_font(11), tags="dyn")
+
+        c.create_text(30, 575, text=f"КРОК {step + 1}/3 · {title}", anchor="w", fill=GOLD,
+                      font=title_font(12), tags="dyn")
+
+    # ================= підсумок =================
     def show_summary(self):
         self.state = "over"
         g = self.game
         st = g.stats()
         new_record = save_record(g.level, g.goals)
-        lines = [(g.verdict(), 18, True),
-                 (f"Голів: {g.goals} з {g.shot_num}", 16, False),
-                 ("", 4, False),
-                 (f"Воротар вгадав зону: {st['guessed']} раз(и)", 12, False),
-                 (f"Сейвів: {st['saves']}   Промахів: {st['misses']}", 12, False),
-                 (f"Ваша улюблена зона: {ZONE_NAMES[st['favourite']]}", 12, False)]
+        win = g.is_win()
+        self.last_game = (f"{'Перемога' if win else 'Поразка'} {g.goals} : {g.shot_num - g.goals}", g.level)
+
+        c = self.canvas
+        self.buttons = []
+        self.panel(130, 100, 830, 510, outline=GREEN if win else RED, tag="dyn")
+        c.create_text(W / 2, 140, text="ПЕРЕМОГА" if win else "ПОРАЗКА", fill=GREEN if win else RED,
+                      font=title_font(30), tags="dyn")
+        c.create_text(W / 2, 178, text=g.verdict(), fill=TEXT, font=font(12), tags="dyn")
+        c.create_text(300, 240, text=f"{g.goals} : {g.shot_num - g.goals}", fill=TEXT,
+                      font=title_font(40), tags="dyn")
+        lines = [f"Воротар вгадав зону: {st['guessed']} раз(и)",
+                 f"Сейвів: {st['saves']}    Промахів: {st['misses']}",
+                 f"Ваша улюблена зона: {ZONE_NAMES[st['favourite']]}"]
+        for i, text in enumerate(lines):
+            c.create_text(300, 300 + i * 26, text=text, fill=MUTED, font=font(11), tags="dyn")
         if new_record:
-            lines.append(("НОВИЙ РЕКОРД!", 16, True))
-        lines += [("", 4, False),
-                  ("Enter — ще раз    Esc — меню", 12, True)]
-        self.show_panel(lines)
+            c.create_text(300, 395, text="НОВИЙ РЕКОРД!", fill=GOLD, font=title_font(18), tags="dyn")
+        self.draw_shot_map(550, 255)
+        self.button(330, 445, 470, 481, "ЩЕ РАЗ", lambda: self.start_game(g.level), tag="dyn")
+        self.button(490, 445, 630, 481, "МЕНЮ", self.show_menu, primary=False, tag="dyn")
+
+    def draw_shot_map(self, mx, my):
+        # карта ударів: точки — куди цілився гравець, пунктир — де стрибав воротар
+        c, k = self.canvas, 0.8
+        gw, gh = (GX2 - GX1) * k, (GY2 - GY1) * k
+        cw, ch = gw / 3, gh / 2
+        c.create_text(mx + gw / 2, my - 45, text="КАРТА УДАРІВ", fill=MUTED, font=font(8, True), tags="dyn")
+        c.create_rectangle(mx, my, mx + gw, my + gh, fill="#132530", outline="white", width=2, tags="dyn")
+        for i in (1, 2):
+            c.create_line(mx + i * cw, my, mx + i * cw, my + gh, fill=PANEL_LINE, tags="dyn")
+        c.create_line(mx, my + ch, mx + gw, my + ch, fill=PANEL_LINE, tags="dyn")
+        for n, (pt, kz, res) in enumerate(self.shot_log):
+            zx, zy = mx + (kz % 3) * cw, my + (kz // 3) * ch
+            c.create_rectangle(zx + 3, zy + 3, zx + cw - 3, zy + ch - 3, outline="#2ec4d6",
+                               dash=(3, 3), tags="dyn")
+            sx, sy = mx + (pt[0] - GX1) * k, my + (pt[1] - GY1) * k
+            color = {GOAL: GREEN, SAVE: RED}.get(res, "#dddddd")
+            c.create_oval(sx - 7, sy - 7, sx + 7, sy + 7, fill=color, outline="#05080d", tags="dyn")
+            c.create_text(sx, sy, text=str(n + 1), fill="#05080d", font=font(7, True), tags="dyn")
+        ly = my + gh + 24
+        for i, (color, label) in enumerate([(GREEN, "гол"), (RED, "сейв"), ("#dddddd", "промах")]):
+            x = mx + i * 70
+            c.create_oval(x, ly - 5, x + 10, ly + 5, fill=color, outline="", tags="dyn")
+            c.create_text(x + 15, ly, text=label, anchor="w", fill=MUTED, font=font(8), tags="dyn")
+        c.create_rectangle(mx, ly + 17, mx + 12, ly + 27, outline="#2ec4d6", dash=(3, 3), tags="dyn")
+        c.create_text(mx + 18, ly + 22, text="де стрибав воротар", anchor="w", fill=MUTED, font=font(8), tags="dyn")
 
     # ================= керування =================
     def on_key(self, event):
         key = event.keysym
-        if self.state == "menu":
+        s = self.state
+        if s == "menu":
+            if key == "Return":
+                self.start_game("medium")
+        elif s == "levels":
             if key in ("1", "2", "3"):
                 self.start_game(LEVEL_ORDER[int(key) - 1])
-        elif self.state == "aim":
-            row, col = self.selected // 3, self.selected % 3
-            if key == "Left" and col > 0:
-                col -= 1
-            elif key == "Right" and col < 2:
-                col += 1
-            elif key == "Up" and row > 0:
-                row -= 1
-            elif key == "Down" and row < 1:
-                row += 1
-            elif key == "space":
-                self.start_power()
-                return
-            self.selected = row * 3 + col
-            self.canvas.coords(self.highlight, *zone_rect(self.selected))
-        elif self.state == "power" and key == "space":
-            self.shoot()
-        elif self.state == "over":
+            elif key == "Escape":
+                self.show_menu()
+        elif s in ("records", "help"):
+            if key in ("Escape", "Return"):
+                self.show_menu()
+        elif s in STEPS:
+            if key == "space":
+                self.press()
+        elif s == "over":
             if key == "Return":
                 self.start_game(self.game.level)
             elif key == "Escape":
                 self.show_menu()
 
     def on_click(self, event):
-        # клік по зоні = вибір зони і одразу перехід до сили
-        if self.state != "aim":
+        if self.state in STEPS:
+            self.press()             # у грі клік працює як пробіл
             return
-        zone = zone_at(event.x, event.y)
-        if zone is not None:
-            self.selected = zone
-            self.canvas.coords(self.highlight, *zone_rect(zone))
-            self.start_power()
+        # шукаємо кнопку під курсором (останні додані — зверху)
+        for x1, y1, x2, y2, action in reversed(self.buttons):
+            if x1 <= event.x <= x2 and y1 <= event.y <= y2:
+                action()
+                return
