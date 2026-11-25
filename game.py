@@ -9,6 +9,8 @@ DRAW_GOALS = 3       # стільки голів — нічия, буде "зо�
 
 
 class Game:
+    turn = "shoot"   # у цьому режимі гравець тільки б'є
+
     def __init__(self, level="medium"):
         self.set_level(level)
 

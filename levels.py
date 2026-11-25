@@ -4,22 +4,28 @@
 #   base      — базова вага кожної зони (більше = воротар менш передбачуваний)
 #   min_power — нижче цієї сили удар слабкий
 #   max_safe  — вище цієї сили з'являється шанс промаху
+#   reach     — на скільки метрів дотягуються руки, коли ви на воротах
+#   dive_speed — як швидко ви летите в стрибку, м/с
+#   read_chance — як часто нападник бачить ваш ранній стрибок і б'є в інший бік
 
 LEVELS = {
     "easy": {
         "name": "Легкий",
         "skill": 0.4, "decay": 0.6, "base": 1.0,
         "min_power": 35, "max_safe": 85,
+        "reach": 0.8, "dive_speed": 8.0, "read_chance": 0.4,
     },
     "medium": {
         "name": "Середній",
         "skill": 0.7, "decay": 0.8, "base": 0.5,
         "min_power": 40, "max_safe": 80,
+        "reach": 0.7, "dive_speed": 7.0, "read_chance": 0.6,
     },
     "hard": {
         "name": "Складний",
         "skill": 0.9, "decay": 0.9, "base": 0.3,
         "min_power": 45, "max_safe": 75,
+        "reach": 0.6, "dive_speed": 6.0, "read_chance": 0.8,
     },
 }
 
