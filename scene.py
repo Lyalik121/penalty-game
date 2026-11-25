@@ -65,10 +65,11 @@ def draw_goal(c, dx=0):
     c.create_line(x1, GY2, x1, GY1, x2, GY1, x2, GY2, fill="white", width=7)
 
 
-def draw_keeper(c, x, y, lean=0.0, hands=-44, tag="dyn"):
+def draw_keeper(c, x, y, lean=0.0, hands=-44, shirt="#2ec4d6", tag="dyn"):
     # воротар; (x, y) — точка між ногами, lean від -1 (стрибок вліво) до 1 (вправо),
     # hands — висота рук відносно ніг (-44 — стоїть, -70 — вгору, -22 — вниз).
     # У стрибку тіло нахиляється разом із lean (повертаємо навколо тазу).
+    # shirt — колір футболки (ШІ-воротар бірюзовий, гравець на воротах — зелений).
     shadow_y = max(y, KEEPER_HOME[1])        # тінь завжди на газоні
     c.create_oval(x - 26, shadow_y - 4, x + 26, shadow_y + 6, fill=GRASS, outline="", tags=tag)
     a = lean * 0.9                           # кут нахилу (радіани)
@@ -89,13 +90,13 @@ def draw_keeper(c, x, y, lean=0.0, hands=-44, tag="dyn"):
     box(-9, -26, -3, 0, "#f1c9a0")           # ноги
     box(3, -26, 9, 0, "#f1c9a0")
     box(-11, -36, 11, -24, "#111111")        # шорти
-    box(-13, -64, 13, -36, "#2ec4d6")        # футболка
+    box(-13, -64, 13, -36, shirt)            # футболка
     # руки тягнуться до точки рукавичок (вона не залежить від нахилу)
     hx, hy = keeper_hands(x, y, lean, hands)
     lx, rx_ = hx - 26, hx + 26
     sl, sr = rot(-12, -60), rot(12, -60)
-    c.create_line(sl[0], sl[1], lx, hy, fill="#2ec4d6", width=6, tags=tag)
-    c.create_line(sr[0], sr[1], rx_, hy, fill="#2ec4d6", width=6, tags=tag)
+    c.create_line(sl[0], sl[1], lx, hy, fill=shirt, width=6, tags=tag)
+    c.create_line(sr[0], sr[1], rx_, hy, fill=shirt, width=6, tags=tag)
     c.create_oval(lx - 6, hy - 6, lx + 6, hy + 6, fill="white", outline="#333333", tags=tag)   # рукавички
     c.create_oval(rx_ - 6, hy - 6, rx_ + 6, hy + 6, fill="white", outline="#333333", tags=tag)
     hcx, hcy = rot(0, -72)                   # голова
@@ -109,10 +110,11 @@ def keeper_hands(x, y, lean, hands=-44):
     return x + lean * 30, y + hands
 
 
-def draw_player(c, x, y, tag="player", swing=0.0):
+def draw_player(c, x, y, tag="player", swing=0.0, shirt="#2741c9", number="7"):
     # гравець зі спини; (x, y) — точка між ногами
     # swing 0..1 — права нога відводиться назад (розбіг і замах)
-    skin, shirt = "#e0b48a", "#2741c9"
+    # shirt і number — колір і номер футболки (ви — синій №7, ПК — червоний №9)
+    skin = "#e0b48a"
     lift, bx = swing * 30, swing * 12
     c.create_oval(x - 50, y - 8, x + 50, y + 10, fill=GRASS, outline="", tags=tag)
     c.create_polygon(x - 28, y - 70, x - 8, y - 70, x - 12, y, x - 30, y, fill=skin, outline="", tags=tag)
@@ -130,7 +132,7 @@ def draw_player(c, x, y, tag="player", swing=0.0):
                      fill=shirt, outline="", tags=tag)
     c.create_line(x - 54, y - 138, x - 50, y - 100, fill=skin, width=10, tags=tag)             # руки
     c.create_line(x + 54, y - 138, x + 50, y - 100, fill=skin, width=10, tags=tag)
-    c.create_text(x, y - 160, text="7", fill="white", font=title_font(30), tags=tag)
+    c.create_text(x, y - 160, text=number, fill="white", font=title_font(30), tags=tag)
     c.create_rectangle(x - 9, y - 214, x + 9, y - 198, fill=skin, outline="", tags=tag)        # шия
     c.create_oval(x - 20, y - 252, x + 20, y - 208, fill=skin, outline="", tags=tag)           # голова
     c.create_arc(x - 21, y - 254, x + 21, y - 214, start=-10, extent=200, fill="#1a120c", outline="", tags=tag)
@@ -177,4 +179,3 @@ def draw_icon(c, icon, x, y, color, tag=""):
             c.create_line(x - 9, y - 7 + i * 7, x + 9, y - 7 + i * 7, fill=color, width=3, tags=tag)
     else:
         c.create_text(x, y, text="?", fill=color, font=title_font(16), tags=tag)
-
